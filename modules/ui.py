@@ -448,8 +448,49 @@ def create_override_settings_dropdown(tabname, row):
 
     return dropdown
 
+def create_setting_component(key, is_quicksettings=False):
+    def fun():
+        return opts.data[key] if key in opts.data else opts.data_labels[key].default
+
+    info = opts.data_labels[key]
+    t = type(info.default)
+    
+    if(info ==None):
+        args = info.component_args() if callable(info.component_args) else info.component_args
+    else:
+        args = {}
+
+    if info.component is not None:
+        comp = info.component
+    elif t == str:
+        comp = gr.Textbox
+    elif t == int:
+        comp = gr.Number
+    elif t == bool:
+        comp = gr.Checkbox
+    else:
+        raise Exception(f'bad options item type: {str(t)} for key {key}')
+
+    elem_id = "setting_"+key
+
+    if info.refresh is not None:
+        if is_quicksettings:
+            res = comp(label=info.label, value=fun(), elem_id=elem_id, **(args or {}))
+            create_refresh_button(res, info.refresh, info.component_args, "refresh_" + key)
+        else:
+            with FormRow():
+                res = comp(label=info.label, value=fun(), elem_id=elem_id, **(args or {}))
+                create_refresh_button(res, info.refresh, info.component_args, "refresh_" + key)
+    else:
+        res = comp(label=info.label, value=fun(), elem_id=elem_id, **(args or {}))
+
+    return res
 
 def create_ui():
+    components = []
+    component_dict = {}
+    shared.settings_components = component_dict
+
     import modules.img2img
     import modules.txt2img
 
@@ -457,13 +498,141 @@ def create_ui():
 
     parameters_copypaste.reset()
 
+    script_callbacks.ui_settings_callback()
+    opts.reorder()
+
+
+    with gr.Blocks(analytics_enabled=False) as settings_interface:
+        dummy_component = gr.Label(visible=False)
+        with gr.Row():
+            with gr.Column(scale=6):
+                settings_submit = gr.Button(value="Apply settings", variant='primary', elem_id="settings_submit")
+            with gr.Column():
+                restart_gradio = gr.Button(value='Reload UI', variant='primary', elem_id="settings_restart_gradio")
+
+        result = gr.HTML(elem_id="settings_result")
+
+        quicksettings_names = [x.strip() for x in opts.quicksettings.split(",")]
+        quicksettings_names = {x: i for i, x in enumerate(quicksettings_names) if x != 'quicksettings'}
+
+        quicksettings_list = []
+
+        previous_section = None
+        current_tab = None
+        current_row = None
+        with gr.Tabs(elem_id="settings"):
+            for i, (k, item) in enumerate(opts.data_labels.items()):
+                section_must_be_skipped = item.section[0] is None
+
+                if previous_section != item.section and not section_must_be_skipped:
+                    elem_id, text = item.section
+
+                    if current_tab is not None:
+                        current_row.__exit__()
+                        current_tab.__exit__()
+
+                    gr.Group()
+                    current_tab = gr.TabItem(elem_id="settings_{}".format(elem_id), label=text)
+                    current_tab.__enter__()
+                    current_row = gr.Column(variant='compact')
+                    current_row.__enter__()
+
+                    previous_section = item.section
+
+                if k in quicksettings_names and not shared.cmd_opts.freeze_settings:
+                    quicksettings_list.append((i, k, item))
+                    components.append(dummy_component)
+                elif section_must_be_skipped:
+                    components.append(dummy_component)
+                else:
+                    component = create_setting_component(k)
+                    component_dict[k] = component
+                    components.append(component)
+
+            if current_tab is not None:
+                current_row.__exit__()
+                current_tab.__exit__()
+
+            with gr.TabItem("Actions", id="actions"):
+                request_notifications = gr.Button(value='Request browser notifications', elem_id="request_notifications")
+                download_localization = gr.Button(value='Download localization template', elem_id="download_localization")
+                reload_script_bodies = gr.Button(value='Reload custom script bodies (No ui updates, No restart)', variant='secondary', elem_id="settings_reload_script_bodies")
+                with gr.Row():
+                    unload_sd_model = gr.Button(value='Unload SD checkpoint to free VRAM', elem_id="sett_unload_sd_model")
+                    reload_sd_model = gr.Button(value='Reload the last SD checkpoint back into VRAM', elem_id="sett_reload_sd_model")
+
+            with gr.TabItem("Licenses", id="licenses"):
+                gr.HTML(shared.html("licenses.html"), elem_id="licenses")
+
+            gr.Button(value="Show all pages", elem_id="settings_show_all_pages")
+            
+
+        def unload_sd_weights():
+            modules.sd_models.unload_model_weights()
+
+        def reload_sd_weights():
+            modules.sd_models.reload_model_weights()
+
+        unload_sd_model.click(
+            fn=unload_sd_weights,
+            inputs=[],
+            outputs=[]
+        )
+
+        reload_sd_model.click(
+            fn=reload_sd_weights,
+            inputs=[],
+            outputs=[]
+        )
+
+        request_notifications.click(
+            fn=lambda: None,
+            inputs=[],
+            outputs=[],
+            _js='function(){}'
+        )
+
+        download_localization.click(
+            fn=lambda: None,
+            inputs=[],
+            outputs=[],
+            _js='download_localization'
+        )
+
+        def reload_scripts():
+            modules.scripts.reload_script_body_only()
+            reload_javascript()  # need to refresh the html page
+
+        reload_script_bodies.click(
+            fn=reload_scripts,
+            inputs=[],
+            outputs=[]
+        )
+
+        def request_restart():
+            shared.state.interrupt()
+            shared.state.need_restart = True
+
+        restart_gradio.click(
+            fn=request_restart,
+            _js='restart_reload',
+            inputs=[],
+            outputs=[],
+        )
+
+    with gr.Blocks(analytics_enabled=False, title="quicksettings") as quicksettings_interface:
+        with gr.Row(elem_id="quicksettings", variant="compact"):
+            for i, k, item in sorted(quicksettings_list, key=lambda x: quicksettings_names.get(x[1], x[0])):
+                component = create_setting_component(k, is_quicksettings=True)
+                component_dict[k] = component
+
     modules.scripts.scripts_current = modules.scripts.scripts_txt2img
     modules.scripts.scripts_txt2img.initialize_scripts(is_img2img=False)
 
     with gr.Blocks(analytics_enabled=False) as txt2img_interface:
         txt2img_prompt, txt2img_prompt_styles, txt2img_negative_prompt, submit, _, _, txt2img_prompt_style_apply, txt2img_save_style, txt2img_paste, extra_networks_button, token_counter, token_button, negative_token_counter, negative_token_button, restore_progress_button = create_toprow(is_img2img=False)
 
-        dummy_component = gr.Label(visible=False)
+
         txt_prompt_img = gr.File(label="", elem_id="txt2img_prompt_image", file_count="single", type="binary", visible=False)
 
         with FormRow(variant='compact', elem_id="txt2img_extra_networks", visible=False) as extra_networks:
@@ -555,6 +724,7 @@ def create_ui():
                 _js="submit",
                 inputs=[
                     dummy_component,
+                    component_dict['sd_model_checkpoint'],
                     txt2img_prompt,
                     txt2img_negative_prompt,
                     txt2img_prompt_styles,
@@ -904,6 +1074,7 @@ def create_ui():
                 inputs=[
                     dummy_component,
                     dummy_component,
+                    component_dict['sd_model_checkpoint'],
                     img2img_prompt,
                     img2img_negative_prompt,
                     img2img_prompt_styles,
@@ -1444,44 +1615,9 @@ def create_ui():
             outputs=[],
         )
 
-    def create_setting_component(key, is_quicksettings=False):
-        def fun():
-            return opts.data[key] if key in opts.data else opts.data_labels[key].default
 
-        info = opts.data_labels[key]
-        t = type(info.default)
 
-        args = info.component_args() if callable(info.component_args) else info.component_args
 
-        if info.component is not None:
-            comp = info.component
-        elif t == str:
-            comp = gr.Textbox
-        elif t == int:
-            comp = gr.Number
-        elif t == bool:
-            comp = gr.Checkbox
-        else:
-            raise Exception(f'bad options item type: {str(t)} for key {key}')
-
-        elem_id = "setting_"+key
-
-        if info.refresh is not None:
-            if is_quicksettings:
-                res = comp(label=info.label, value=fun(), elem_id=elem_id, **(args or {}))
-                create_refresh_button(res, info.refresh, info.component_args, "refresh_" + key)
-            else:
-                with FormRow():
-                    res = comp(label=info.label, value=fun(), elem_id=elem_id, **(args or {}))
-                    create_refresh_button(res, info.refresh, info.component_args, "refresh_" + key)
-        else:
-            res = comp(label=info.label, value=fun(), elem_id=elem_id, **(args or {}))
-
-        return res
-
-    components = []
-    component_dict = {}
-    shared.settings_components = component_dict
 
     script_callbacks.ui_settings_callback()
     opts.reorder()
@@ -1516,122 +1652,7 @@ def create_ui():
 
         return get_value_for_setting(key), opts.dumpjson()
 
-    with gr.Blocks(analytics_enabled=False) as settings_interface:
-        with gr.Row():
-            with gr.Column(scale=6):
-                settings_submit = gr.Button(value="Apply settings", variant='primary', elem_id="settings_submit")
-            with gr.Column():
-                restart_gradio = gr.Button(value='Reload UI', variant='primary', elem_id="settings_restart_gradio")
 
-        result = gr.HTML(elem_id="settings_result")
-
-        quicksettings_names = [x.strip() for x in opts.quicksettings.split(",")]
-        quicksettings_names = {x: i for i, x in enumerate(quicksettings_names) if x != 'quicksettings'}
-
-        quicksettings_list = []
-
-        previous_section = None
-        current_tab = None
-        current_row = None
-        with gr.Tabs(elem_id="settings"):
-            for i, (k, item) in enumerate(opts.data_labels.items()):
-                section_must_be_skipped = item.section[0] is None
-
-                if previous_section != item.section and not section_must_be_skipped:
-                    elem_id, text = item.section
-
-                    if current_tab is not None:
-                        current_row.__exit__()
-                        current_tab.__exit__()
-
-                    gr.Group()
-                    current_tab = gr.TabItem(elem_id="settings_{}".format(elem_id), label=text)
-                    current_tab.__enter__()
-                    current_row = gr.Column(variant='compact')
-                    current_row.__enter__()
-
-                    previous_section = item.section
-
-                if k in quicksettings_names and not shared.cmd_opts.freeze_settings:
-                    quicksettings_list.append((i, k, item))
-                    components.append(dummy_component)
-                elif section_must_be_skipped:
-                    components.append(dummy_component)
-                else:
-                    component = create_setting_component(k)
-                    component_dict[k] = component
-                    components.append(component)
-
-            if current_tab is not None:
-                current_row.__exit__()
-                current_tab.__exit__()
-
-            with gr.TabItem("Actions", id="actions"):
-                request_notifications = gr.Button(value='Request browser notifications', elem_id="request_notifications")
-                download_localization = gr.Button(value='Download localization template', elem_id="download_localization")
-                reload_script_bodies = gr.Button(value='Reload custom script bodies (No ui updates, No restart)', variant='secondary', elem_id="settings_reload_script_bodies")
-                with gr.Row():
-                    unload_sd_model = gr.Button(value='Unload SD checkpoint to free VRAM', elem_id="sett_unload_sd_model")
-                    reload_sd_model = gr.Button(value='Reload the last SD checkpoint back into VRAM', elem_id="sett_reload_sd_model")
-
-            with gr.TabItem("Licenses", id="licenses"):
-                gr.HTML(shared.html("licenses.html"), elem_id="licenses")
-
-            gr.Button(value="Show all pages", elem_id="settings_show_all_pages")
-            
-
-        def unload_sd_weights():
-            modules.sd_models.unload_model_weights()
-
-        def reload_sd_weights():
-            modules.sd_models.reload_model_weights()
-
-        unload_sd_model.click(
-            fn=unload_sd_weights,
-            inputs=[],
-            outputs=[]
-        )
-
-        reload_sd_model.click(
-            fn=reload_sd_weights,
-            inputs=[],
-            outputs=[]
-        )
-
-        request_notifications.click(
-            fn=lambda: None,
-            inputs=[],
-            outputs=[],
-            _js='function(){}'
-        )
-
-        download_localization.click(
-            fn=lambda: None,
-            inputs=[],
-            outputs=[],
-            _js='download_localization'
-        )
-
-        def reload_scripts():
-            modules.scripts.reload_script_body_only()
-            reload_javascript()  # need to refresh the html page
-
-        reload_script_bodies.click(
-            fn=reload_scripts,
-            inputs=[],
-            outputs=[]
-        )
-
-        def request_restart():
-            shared.state.interrupt()
-            shared.state.need_restart = True
-
-        restart_gradio.click(
-            fn=request_restart,
-            _js='restart_reload',
-            inputs=[],
-            outputs=[],
-        )
 
     interfaces = [
         (txt2img_interface, "txt2img", "txt2img"),
@@ -1653,10 +1674,11 @@ def create_ui():
         shared.tab_names.append(label)
 
     with gr.Blocks(theme=shared.gradio_theme, analytics_enabled=False, title="Stable Diffusion") as demo:
-        with gr.Row(elem_id="quicksettings", variant="compact"):
-            for i, k, item in sorted(quicksettings_list, key=lambda x: quicksettings_names.get(x[1], x[0])):
-                component = create_setting_component(k, is_quicksettings=True)
-                component_dict[k] = component
+        # with gr.Row(elem_id="quicksettings", variant="compact"):
+        #     for i, k, item in sorted(quicksettings_list, key=lambda x: quicksettings_names.get(x[1], x[0])):
+        #         component = create_setting_component(k, is_quicksettings=True)
+        #         component_dict[k] = component
+        quicksettings_interface.render()
 
         parameters_copypaste.connect_paste_params_buttons()
 
@@ -1837,6 +1859,7 @@ def create_ui():
         if type(x) == gr.Tabs:
             apply_field(x, 'selected', check_tab_id)
 
+    visit(quicksettings_interface, loadsave, "quicksettings")
     visit(txt2img_interface, loadsave, "txt2img")
     visit(img2img_interface, loadsave, "img2img")
     visit(extras_interface, loadsave, "extras")
