@@ -125,8 +125,8 @@ def img2img(id_task: str, mode: int,model:str,  prompt: str, negative_prompt: st
 
     assert 0. <= denoising_strength <= 1., 'can only work with strength in [0.0, 1.0]'
 
-    checkpoint_info = get_closet_checkpoint_match(model)
-    sd_model = load_model(checkpoint_info)
+    shared.opts.sd_model_checkpoint = model
+    sd_model = shared.sd_model
     
 
     p = StableDiffusionProcessingImg2Img(

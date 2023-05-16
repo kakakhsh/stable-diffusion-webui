@@ -287,7 +287,7 @@ def load_model_weights(model, checkpoint_info: CheckpointInfo, state_dict, timer
     del state_dict
     timer.record("apply weights to model")
 
-    if shared.opts.sd_checkpoint_cache > 0:
+    if shared.opts.get_default("sd_checkpoint_cache")  > 0:
         # cache newly loaded model
         checkpoints_loaded[checkpoint_info] = model.state_dict().copy()
 
@@ -322,7 +322,7 @@ def load_model_weights(model, checkpoint_info: CheckpointInfo, state_dict, timer
     timer.record("apply dtype to VAE")
 
     # clean up cache if limit is reached
-    while len(checkpoints_loaded) > shared.opts.sd_checkpoint_cache:
+    while len(checkpoints_loaded) > shared.opts.get_default("sd_checkpoint_cache") :
         checkpoints_loaded.popitem(last=False)
 
     model.sd_model_hash = sd_model_hash
